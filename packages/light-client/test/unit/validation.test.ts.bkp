@@ -10,48 +10,11 @@ import {
   NEXT_SYNC_COMMITTEE_GINDEX,
   SLOTS_PER_EPOCH,
   SYNC_COMMITTEE_SIZE,
-  BLOCK_BODY_EXECUTION_PAYLOAD_GINDEX,
-  HISTORICAL_ROOTS_LIMIT,
-  SLOTS_PER_HISTORICAL_ROOT
 } from "@lodestar/params";
-import {assertValidLightClientUpdate, BLOCKS_ROOTS_ROOT_GINDEX, verifyAncestoryProof, verifyExecutionBody} from "../../src/validation.js";
+import {assertValidLightClientUpdate, BLOCKS_ROOTS_ROOT_GINDEX} from "../../src/validation.js";
 import {LightClientSnapshotFast, SyncCommitteeFast} from "../../src/types.js";
 import {getSyncAggregateSigningRoot, signAndAggregate} from "../utils/utils.js";
-import {Trie} from "@ethereumjs/trie";
-import {RLP} from "@ethereumjs/rlp";
-import {PostByzantiumTxReceipt} from "@ethereumjs/vm";
-import { intToBytes, bigIntToBytes } from "@ethereumjs/util";
-import {Log} from "@ethereumjs/evm";
-import {keccak256} from "ethereum-cryptography/keccak.js";
-function defaultBeaconBlockHeader(slot: Slot): deneb.LightClientHeader {
-  const header = ssz.deneb.LightClientHeader.defaultValue();
-  header.beacon.slot = slot;
-  return header;
-}
-
-async function createReceiptTrie() {
-  const log: Log = [Buffer.alloc(20), // 20-byte address
-    [Buffer.alloc(0)], Buffer.alloc(20)];
-                    
-  const trie = await Trie.create();
-  let receipt: PostByzantiumTxReceipt  = {
-    status: 1,
-    cumulativeBlockGasUsed: 0n,
-    bitvector: Buffer.alloc(0),
-    logs: [log],
-  };
-  let encodedReceipt = RLP.encode(
-        [
-            intToBytes(receipt.status),
-            bigIntToBytes(receipt.cumulativeBlockGasUsed),
-            RLP.encode(receipt.logs),
-        ],
-  );
-
-  const key = keccak256(encodedReceipt);
-  await trie.put(key, encodedReceipt);
-  return trie.root();
-}
+import { ExecutionPayloadHeader } from "@lodestar/types/lib/allForks/types.js";
 
 describe("validation", function () {
   // In browser test this process is taking more time than default 2000ms
@@ -94,12 +57,36 @@ describe("validation", function () {
     };
   }
 
-  beforeAll(async function () {
+function defaultBeaconBlockHeader(slot: Slot): deneb.LightClientHeader {
+    const header = ssz.deneb.LightClientHeader.defaultValue();
+    header.beacon.slot = slot;
+    return header;
+}
+
+  beforeAll(function () {
     // Update slot must > snapshot slot
     // attestedHeaderSlot must == updateHeaderSlot + 1
     const snapshotHeaderSlot = 1;
     const updateHeaderSlot = EPOCHS_PER_SYNC_COMMITTEE_PERIOD * SLOTS_PER_EPOCH + 1;
     const attestedHeaderSlot = updateHeaderSlot + 1;
+
+    const executionPayloadHeader: ExecutionPayloadHeader = {
+      parentHash: Buffer.alloc(32),            // 0x000...
+      feeRecipient: Buffer.alloc(20),         // 0x000...
+      stateRoot: Buffer.alloc(32),            // State root of execution layer
+      receiptsRoot: Buffer.alloc(32),         // Receipt root
+      logsBloom: Buffer.alloc(256),           // Bloom filter for logs
+      prevRandao: Buffer.alloc(32),           // Previous RANDAO value
+      blockNumber: 0,                        // Block number
+      gasLimit: 0,                          // Gas limit
+      gasUsed: 0,                           // Gas used
+      timestamp: 0,                         // Block timestamp
+      extraData: Buffer.alloc(0),            // Extra data (optional)
+      baseFeePerGas: 0n,                    // Base fee per gas
+      blockHash: Buffer.alloc(32),           // Block hash
+      transactionsRoot: Buffer.alloc(32),    // Transactions root
+    };
+
 
     const {syncCommittee: nextSyncCommittee, syncCommitteeFast: nextSyncCommitteeFast, sks} = createSyncCommittee(1);
     const {syncCommittee, syncCommitteeFast, sks: syncCommitteeSks} = createSyncCommittee(2);
@@ -108,27 +95,17 @@ describe("validation", function () {
     // TODO: Make changes to ancestorState here
     ancestorState.commit();
 
-    const ancestorHeader = defaultBeaconBlockHeader(updateHeaderSlot - 2);
-    
-    // Add receipt trie to execution payload header
-    const beaconBlockBody = ssz.deneb.BlindedBeaconBlockBody.defaultViewDU();
-    beaconBlockBody.executionPayloadHeader.receiptsRoot = await createReceiptTrie(); 
-    beaconBlockBody.commit();//TODO: Take receiptsRoot from argument
-    const beaconBlockBodyRoot = beaconBlockBody.hashTreeRoot();
-    const executionPayloadHeaderBranch = new Tree(beaconBlockBody.node).getSingleProof(BigInt(BLOCK_BODY_EXECUTION_PAYLOAD_GINDEX));
-    
-    ancestorHeader.beacon.bodyRoot = beaconBlockBodyRoot;
+    const ancestorHeader = defaultBeaconBlockHeader(updateHeaderSlot - 1);
+    // TODO: make changes to ancestorHeader here
     ancestorHeader.beacon.stateRoot = ancestorState.hashTreeRoot();
-    
+
     const finalizedState = ssz.deneb.BeaconState.defaultViewDU();
-    finalizedState.blockRoots.set(ancestorHeader.beacon.slot % SLOTS_PER_HISTORICAL_ROOT, ssz.deneb.LightClientHeader.hashTreeRoot(ancestorHeader));
+    finalizedState.blockRoots.set(0, ssz.deneb.LightClientHeader.hashTreeRoot(ancestorHeader));
     finalizedState.blockRoots.commit();
     finalizedState.commit();
 
     blockRootsBranch = new Tree(finalizedState.node).getSingleProof(BigInt(BLOCKS_ROOTS_ROOT_GINDEX));
-
     blocksRootRoot = finalizedState.blockRoots.hashTreeRoot();
-    const blockRootBranch = new Tree(finalizedState.blockRoots.node).getSingleProof(BigInt(SLOTS_PER_HISTORICAL_ROOT + (ancestorHeader.beacon.slot % SLOTS_PER_HISTORICAL_ROOT)));
 
     // finalized header must have stateRoot to finalizedState
     const finalizedHeader = defaultBeaconBlockHeader(updateHeaderSlot);
@@ -138,7 +115,7 @@ describe("validation", function () {
     const attestedState = ssz.deneb.BeaconState.defaultViewDU();
     attestedState.finalizedCheckpoint = ssz.phase0.Checkpoint.toViewDU({
       epoch: 0,
-      root: ssz.phase0.BeaconBlockHeader.hashTreeRoot(finalizedHeader.beacon),
+      root: ssz.deneb.LightClientHeader.hashTreeRoot(finalizedHeader),
     });
 
     // attested state must contain next sync committees
@@ -170,21 +147,9 @@ describe("validation", function () {
       currentSyncCommittee: syncCommitteeFast,
       nextSyncCommittee: nextSyncCommitteeFast,
     };
-
-    verifyAncestoryProof(ancestorHeader, blocksRootRoot, blockRootBranch);
-    verifyExecutionBody(ancestorHeader, beaconBlockBody.executionPayloadHeader, executionPayloadHeaderBranch);
-    //verifyReceiptProof();
-
-
   });
 
   it("should validate valid update", () => {
     expect(() => assertValidLightClientUpdate(config, snapshot.currentSyncCommittee, update, blockRootsBranch, blocksRootRoot)).not.toThrow();
-  });
-
-  it("should validate valid update with objectRoot", () => {
-    // Verify ancestry proof
-    
-    
   });
 });

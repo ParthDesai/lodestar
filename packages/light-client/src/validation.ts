@@ -1,6 +1,6 @@
 import bls from "@chainsafe/bls";
 import type {PublicKey, Signature} from "@chainsafe/bls/types";
-import {altair, Root, Slot, ssz, allForks} from "@lodestar/types";
+import {altair, Root, Slot, ssz, allForks, deneb} from "@lodestar/types";
 import {
   FINALIZED_ROOT_INDEX,
   FINALIZED_ROOT_DEPTH,
@@ -8,12 +8,24 @@ import {
   NEXT_SYNC_COMMITTEE_DEPTH,
   MIN_SYNC_COMMITTEE_PARTICIPANTS,
   DOMAIN_SYNC_COMMITTEE,
+  BLOCK_BODY_EXECUTION_PAYLOAD_GINDEX,
+  BLOCK_BODY_EXECUTION_PAYLOAD_DEPTH,
+  BLOCK_BODY_EXECUTION_PAYLOAD_INDEX,
+  SLOTS_PER_HISTORICAL_ROOT,
 } from "@lodestar/params";
 import {BeaconConfig} from "@lodestar/config";
 import {isValidMerkleBranch} from "./utils/verifyMerkleBranch.js";
 import {assertZeroHashes, getParticipantPubkeys, isEmptyHeader} from "./utils/utils.js";
 import {SyncCommitteeFast} from "./types.js";
 import {computeSyncPeriodAtSlot} from "./utils/clock.js";
+
+export const BLOCKS_ROOTS_ROOT_GINDEX = 37;
+export const BLOCKS_ROOTS_ROOT_DEPTH = 5;
+export const BLOCKS_ROOTS_ROOT_INDEX = 5;
+
+export const BLOCKS_ROOT_AT_INDEX_DEPTH = 13;
+export const BLOCKS_ROOT_AT_GINDEX_START = 2**BLOCKS_ROOT_AT_INDEX_DEPTH;
+
 
 /**
  *
@@ -24,7 +36,9 @@ import {computeSyncPeriodAtSlot} from "./utils/clock.js";
 export function assertValidLightClientUpdate(
   config: BeaconConfig,
   syncCommittee: SyncCommitteeFast,
-  update: allForks.LightClientUpdate
+  update: allForks.LightClientUpdate,
+  blockRootsBranch: Uint8Array<ArrayBufferLike>[],
+  blocksRootRoot: Uint8Array
 ): void {
   // DIFF FROM SPEC: An update with the same header.slot can be valid and valuable to the lightclient
   // It may have more consensus and result in a better snapshot whilst not advancing the state
@@ -40,6 +54,19 @@ export function assertValidLightClientUpdate(
     assertValidFinalityProof(update);
   } else {
     assertZeroHashes(update.finalityBranch, FINALIZED_ROOT_DEPTH, "finalityBranches");
+  }
+
+  // Additinal validation required by the snowbridge pallet
+  if (
+    !isValidMerkleBranch(
+      blocksRootRoot,
+      blockRootsBranch,
+      BLOCKS_ROOTS_ROOT_DEPTH,
+      BLOCKS_ROOTS_ROOT_INDEX,
+      update.finalizedHeader.beacon.stateRoot
+    )
+  ) {
+    throw Error("Invalid Block root merkle branch");
   }
 
   // DIFF FROM SPEC:
@@ -174,4 +201,41 @@ function isValidBlsAggregate(publicKeys: PublicKey[], message: Uint8Array, signa
     (e as Error).message = `Error verifying signature: ${(e as Error).message}`;
     throw e;
   }
+}
+
+export function verifyExecutionBody(ancestorHeader: deneb.LightClientHeader, executionPayloadHeader: deneb.ExecutionPayloadHeader, executionPayloadHeaderBranch: Uint8Array<ArrayBufferLike>[]) {
+  const executionPayloadHeaderRoot = ssz.deneb.ExecutionPayloadHeader.hashTreeRoot(executionPayloadHeader);
+  if (
+    !isValidMerkleBranch(
+      executionPayloadHeaderRoot,
+      executionPayloadHeaderBranch,
+      BLOCK_BODY_EXECUTION_PAYLOAD_DEPTH,
+      BLOCK_BODY_EXECUTION_PAYLOAD_INDEX,
+      ancestorHeader.beacon.bodyRoot
+    )
+  ) {
+    throw Error("Invalid Block root merkle branch");
+  }
+
+}
+
+export function verifyAncestoryProof(ancestorHeader: deneb.LightClientHeader, blocksRootRoot: Uint8Array<ArrayBufferLike>, ancestorHeaderBranch: Uint8Array<ArrayBufferLike>[]) {
+  const ancestorHeaderRoot = ssz.deneb.LightClientHeader.hashTreeRoot(ancestorHeader);
+  console.log(ancestorHeader.beacon.slot);
+  if (
+    !isValidMerkleBranch(
+      ancestorHeaderRoot,
+      ancestorHeaderBranch,
+      BLOCKS_ROOT_AT_INDEX_DEPTH,
+      ancestorHeader.beacon.slot % SLOTS_PER_HISTORICAL_ROOT,
+      blocksRootRoot
+    )
+  ) {
+    throw Error("Invalid Block root merkle branch");
+  }
+  
+}
+
+export function verifyReceiptProof(receiptRoot: Root, receiptProof: Uint8Array<ArrayBufferLike>[]) {
+  
 }
